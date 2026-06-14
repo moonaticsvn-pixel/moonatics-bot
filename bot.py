@@ -4,6 +4,9 @@ from discord import app_commands
 import asyncio
 import json
 import os
+import re
+import aiohttp
+import xml.etree.ElementTree as ET
 import yt_dlp
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
@@ -13,13 +16,11 @@ CONFIG_FILE = "config.json"
 SEEN_FILE = "seen.json"
 POLL_INTERVAL_MINUTES = 5
 
-# Tab URLs per content type
-TABS: dict[str, str] = {
-    "video":      f"https://www.youtube.com/@{YOUTUBE_HANDLE}/videos",
-    "short":      f"https://www.youtube.com/@{YOUTUBE_HANDLE}/shorts",
-    "livestream": f"https://www.youtube.com/@{YOUTUBE_HANDLE}/streams",
-    "community":  f"https://www.youtube.com/@{YOUTUBE_HANDLE}/community",
-}
+CONTENT_TYPES = ["video", "short", "livestream", "community"]
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"}
+
+# Resolved at startup
+channel_id: str = ""
 
 DEFAULT_MESSAGES = {
     "video":      "🎬 {role} New video from **Moonatics**!\n**{title}**\n{url}",
@@ -45,56 +46,116 @@ def save_json(path: str, data) -> None:
 
 
 # ---------------------------------------------------------------------------
-# yt-dlp scraping (blocking — run in executor)
+# Channel ID resolution
 # ---------------------------------------------------------------------------
 
-def _scrape(url: str, content_type: str) -> list[dict]:
+async def resolve_channel_id(session: aiohttp.ClientSession) -> str:
+    """Scrape the channel handle page once to extract the channel ID."""
+    url = f"https://www.youtube.com/@{YOUTUBE_HANDLE}"
+    async with session.get(url, headers=HEADERS) as r:
+        html = await r.text()
+    match = re.search(r'"channelId"\s*:\s*"(UC[^"]+)"', html)
+    if not match:
+        raise ValueError(f"Could not resolve channel ID for @{YOUTUBE_HANDLE}")
+    return match.group(1)
+
+
+# ---------------------------------------------------------------------------
+# RSS feed — videos / shorts / livestreams (no bot detection)
+# ---------------------------------------------------------------------------
+
+NS = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+
+async def fetch_rss(session: aiohttp.ClientSession) -> list[dict]:
+    """Fetch the channel RSS feed — returns up to 15 latest uploads with id + title."""
+    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    async with session.get(url, headers=HEADERS) as r:
+        text = await r.text()
+    root = ET.fromstring(text)
+    results = []
+    for entry in root.findall("atom:entry", NS):
+        vid_id = entry.findtext("yt:videoId", namespaces=NS) or ""
+        title  = entry.findtext("atom:title", namespaces=NS) or ""
+        results.append({"id": vid_id, "title": title})
+    return results
+
+
+async def classify_video(session: aiohttp.ClientSession, vid_id: str) -> str:
     """
-    Full yt-dlp extraction for a YouTube tab — fetches real titles/content for all types.
+    Classify a video as 'short', 'livestream', or 'video' by checking
+    the /shorts/ URL (redirects to /watch if not a short) and the oEmbed data.
     """
+    # Check if it's a short — YouTube returns 200 for valid shorts URLs
+    shorts_url = f"https://www.youtube.com/shorts/{vid_id}"
+    try:
+        async with session.head(shorts_url, headers=HEADERS, allow_redirects=False) as r:
+            if r.status == 200:
+                return "short"
+    except Exception:
+        pass
+
+    # Check if it's a livestream via oEmbed (fast, no auth needed)
+    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid_id}&format=json"
+    try:
+        async with session.get(oembed_url, headers=HEADERS) as r:
+            if r.status == 200:
+                data = await r.json()
+                # Live videos have "live" in the author_name or title — not reliable
+                # Fall back: just check if the watch page has isLiveBroadcast
+                pass
+    except Exception:
+        pass
+
+    # Lightweight check for live broadcast in page metadata
+    watch_url = f"https://www.youtube.com/watch?v={vid_id}"
+    try:
+        async with session.get(watch_url, headers=HEADERS) as r:
+            chunk = await r.content.read(50000)  # read only first 50KB
+            text = chunk.decode("utf-8", errors="ignore")
+            if '"isLiveBroadcast":true' in text or '"isLive":true' in text:
+                return "livestream"
+    except Exception:
+        pass
+
+    return "video"
+
+
+# ---------------------------------------------------------------------------
+# Community posts — yt-dlp flat extraction (much lighter, less bot-detected)
+# ---------------------------------------------------------------------------
+
+def _scrape_community() -> list[dict]:
     opts = {
+        "extract_flat": "in_playlist",
         "quiet": True,
         "no_warnings": True,
         "playlist_items": "1-10",
         "skip_download": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web"],
-            }
-        },
+        "http_headers": HEADERS,
     }
+    url = f"https://www.youtube.com/@{YOUTUBE_HANDLE}/community"
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
         except Exception as e:
-            print(f"[yt-dlp] error scraping {content_type}: {e}")
+            print(f"[yt-dlp] community error: {e}")
             return []
-
     if not info:
         return []
-
     results = []
     for entry in info.get("entries", []):
         if not entry:
             continue
         eid = entry.get("id", "")
-        if content_type == "community":
-            # Post body text is in 'content', fallback to 'title'
-            title = entry.get("content") or entry.get("description") or entry.get("title", "")
-            eurl = entry.get("webpage_url") or f"https://www.youtube.com/post/{eid}"
-        else:
-            title = entry.get("title", "")
-            eurl = entry.get("webpage_url") or f"https://www.youtube.com/watch?v={eid}"
+        title = entry.get("content") or entry.get("description") or entry.get("title", "")
+        eurl = entry.get("webpage_url") or f"https://www.youtube.com/post/{eid}"
         results.append({"id": eid, "title": title, "url": eurl})
     return results
 
 
-async def scrape_tab(content_type: str) -> list[dict]:
+async def fetch_community() -> list[dict]:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _scrape, TABS[content_type], content_type)
+    return await loop.run_in_executor(None, _scrape_community)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +164,7 @@ async def scrape_tab(content_type: str) -> list[dict]:
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
+http_session: aiohttp.ClientSession | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -134,23 +196,55 @@ async def notify(content_type: str, title: str, url: str) -> None:
 
 @tasks.loop(minutes=POLL_INTERVAL_MINUTES)
 async def poll_youtube():
-    seen: dict = load_json(SEEN_FILE, {t: [] for t in TABS})
+    seen: dict = load_json(SEEN_FILE, {t: [] for t in CONTENT_TYPES})
     changed = False
 
-    for content_type in TABS:
-        entries = await scrape_tab(content_type)
-        if not entries:
-            continue
+    # --- Videos / Shorts / Livestreams via RSS ---
+    try:
+        rss_entries = await fetch_rss(http_session)
+    except Exception as e:
+        print(f"[rss] error: {e}")
+        rss_entries = []
 
-        current_ids = [e["id"] for e in entries]
-        new_entries = [e for e in entries if e["id"] not in seen.get(content_type, [])]
+    all_seen_video_ids = (
+        seen.get("video", []) + seen.get("short", []) + seen.get("livestream", [])
+    )
+    new_rss = [e for e in rss_entries if e["id"] not in all_seen_video_ids]
 
-        for entry in reversed(new_entries):  # oldest first
-            print(f"[notify] {content_type}: {entry['title']} — {entry['url']}")
-            await notify(content_type, entry["title"], entry["url"])
-
-        seen[content_type] = current_ids
+    new_by_type: dict[str, list] = {"video": [], "short": [], "livestream": []}
+    for entry in reversed(new_rss):  # oldest first
+        ctype = await classify_video(http_session, entry["id"])
+        url = (
+            f"https://www.youtube.com/shorts/{entry['id']}"
+            if ctype == "short"
+            else f"https://www.youtube.com/watch?v={entry['id']}"
+        )
+        print(f"[notify] {ctype}: {entry['title']} — {url}")
+        await notify(ctype, entry["title"], url)
+        new_by_type[ctype].append(entry["id"])
         changed = True
+
+    # Merge new IDs into seen per type
+    for ctype in ("video", "short", "livestream"):
+        seen[ctype] = seen.get(ctype, []) + new_by_type[ctype]
+        # Keep only IDs still in the RSS feed to avoid unbounded growth
+        rss_ids = [e["id"] for e in rss_entries]
+        seen[ctype] = [i for i in seen[ctype] if i in rss_ids or i in new_by_type[ctype]]
+
+    # --- Community posts via yt-dlp flat ---
+    try:
+        posts = await fetch_community()
+    except Exception as e:
+        print(f"[community] error: {e}")
+        posts = []
+
+    new_posts = [p for p in posts if p["id"] not in seen.get("community", [])]
+    for post in reversed(new_posts):
+        print(f"[notify] community: {post['url']}")
+        await notify("community", post["title"], post["url"])
+        changed = True
+    if posts:
+        seen["community"] = [p["id"] for p in posts]
 
     if changed:
         save_json(SEEN_FILE, seen)
@@ -167,7 +261,14 @@ async def before_poll():
 
 @bot.event
 async def on_ready():
+    global http_session, channel_id
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    http_session = aiohttp.ClientSession()
+    try:
+        channel_id = await resolve_channel_id(http_session)
+        print(f"[youtube] Resolved channel ID: {channel_id}")
+    except Exception as e:
+        print(f"[error] Could not resolve channel ID: {e}")
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -181,12 +282,20 @@ async def seed_seen():
     """On first run, populate seen.json with current content so we don't spam old posts."""
     if os.path.exists(SEEN_FILE):
         return
-    print("[seed] seen.json not found — seeding current content to avoid notification flood...")
-    seen = {}
-    for content_type in TABS:
-        entries = await scrape_tab(content_type)
-        seen[content_type] = [e["id"] for e in entries]
-        print(f"[seed] {content_type}: {len(entries)} entries cached")
+    print("[seed] Seeding current content to avoid notification flood...")
+    seen: dict = {t: [] for t in CONTENT_TYPES}
+    try:
+        rss_entries = await fetch_rss(http_session)
+        seen["video"] = [e["id"] for e in rss_entries]
+        print(f"[seed] videos/shorts/livestreams: {len(rss_entries)} entries cached")
+    except Exception as e:
+        print(f"[seed] RSS error: {e}")
+    try:
+        posts = await fetch_community()
+        seen["community"] = [p["id"] for p in posts]
+        print(f"[seed] community: {len(posts)} entries cached")
+    except Exception as e:
+        print(f"[seed] community error: {e}")
     save_json(SEEN_FILE, seen)
     print("[seed] Done — only new content from this point will trigger notifications")
 
