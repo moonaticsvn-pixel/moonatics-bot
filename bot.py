@@ -177,15 +177,11 @@ yt = app_commands.Group(name="yt", description="YouTube notification settings")
 
 @yt.command(name="setup", description="Set this channel to receive Moonatics YouTube notifications")
 @app_commands.describe(
-    role="Role to ping (leave empty for no ping)",
+    role="Role to ping when something is posted (leave empty for no ping)",
     videos="Notify for regular videos",
     shorts="Notify for Shorts",
     livestreams="Notify for livestreams",
     community="Notify for community posts",
-    video_template="Video message template — use {role}, {title}, {url}",
-    short_template="Short message template — use {role}, {title}, {url}",
-    livestream_template="Livestream message template — use {role}, {title}, {url}",
-    community_template="Community post template — use {role}, {title} (auto-fetched post text), {url}",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def yt_setup(
@@ -195,26 +191,12 @@ async def yt_setup(
     shorts: bool = True,
     livestreams: bool = True,
     community: bool = True,
-    video_template: str | None = None,
-    short_template: str | None = None,
-    livestream_template: str | None = None,
-    community_template: str | None = None,  # {role}, {title} = post text, {url}
 ):
     config: dict = load_json(CONFIG_FILE, {})
     gid = str(interaction.guild_id)
     cid = str(interaction.channel_id)
     config.setdefault(gid, {})
     existing = config[gid].get(cid, {})
-
-    messages = existing.get("messages", DEFAULT_MESSAGES.copy())
-    if video_template:
-        messages["video"] = video_template
-    if short_template:
-        messages["short"] = short_template
-    if livestream_template:
-        messages["livestream"] = livestream_template
-    if community_template:
-        messages["community"] = community_template
 
     config[gid][cid] = {
         "role_id": role.id if role else None,
@@ -224,19 +206,17 @@ async def yt_setup(
             "livestream": livestreams,
             "community": community,
         },
-        "messages": messages,
+        "messages": existing.get("messages", DEFAULT_MESSAGES.copy()),
     }
     save_json(CONFIG_FILE, config)
 
     role_text = role.mention if role else "*(no role)*"
     active = [t for t, v in {"video": videos, "short": shorts, "livestream": livestreams, "community": community}.items() if v]
-    custom = [t for t, v in {"video": video_template, "short": short_template, "livestream": livestream_template, "community": community_template}.items() if v]
-    summary = (f"\n**Custom templates set for:** {', '.join(custom)}" if custom else "")
     await interaction.response.send_message(
         f"✅ Notifications configured!\n"
         f"**Role:** {role_text}\n"
-        f"**Types:** {', '.join(active) or 'none'}"
-        f"{summary}",
+        f"**Types:** {', '.join(active) or 'none'}\n\n"
+        f"Use `/yt message` to customise each notification message.",
         ephemeral=True,
     )
 
