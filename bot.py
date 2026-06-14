@@ -25,7 +25,7 @@ DEFAULT_MESSAGES = {
     "video":      "🎬 {role} New video from **Moonatics**!\n**{title}**\n{url}",
     "short":      "🩳 {role} New Short from **Moonatics**!\n**{title}**\n{url}",
     "livestream": "🔴 {role} **Moonatics** is going LIVE!\n**{title}**\n{url}",
-    "community":  "📢 {role} New community post from **Moonatics**!\n{url}",
+    "community":  "📢 {role} New community post from **Moonatics**!\n{title}\n{url}",
 }
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ yt = app_commands.Group(name="yt", description="YouTube notification settings")
     video_template="Video message template — use {role}, {title}, {url}",
     short_template="Short message template — use {role}, {title}, {url}",
     livestream_template="Livestream message template — use {role}, {title}, {url}",
-    community_template="Community post message template — use {role}, {url}",
+    community_template="Community post message template — use {role}, {title} (post text), {url}",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def yt_setup(
@@ -199,7 +199,7 @@ async def yt_setup(
     video_template: str | None = None,
     short_template: str | None = None,
     livestream_template: str | None = None,
-    community_template: str | None = None,
+    community_template: str | None = None,  # {role}, {title} = post text, {url}
 ):
     config: dict = load_json(CONFIG_FILE, {})
     gid = str(interaction.guild_id)
@@ -258,7 +258,7 @@ async def yt_remove(interaction: discord.Interaction):
 @yt.command(name="message", description="Customise the notification message for a content type")
 @app_commands.describe(
     content_type="Which content type to customise",
-    template="Message template — use {role}, {title}, {url} as placeholders",
+    template="Message template — use {role}, {title}, {url} as placeholders ({title} is post text for community)",
 )
 @app_commands.choices(content_type=[
     app_commands.Choice(name="Video", value="video"),
