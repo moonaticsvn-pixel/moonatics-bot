@@ -7,7 +7,7 @@ import os
 import yt_dlp
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
-YOUTUBE_HANDLE = "moonaticsmusic"
+YOUTUBE_HANDLE = "ragakov"
 
 CONFIG_FILE = "config.json"
 SEEN_FILE = "seen.json"
