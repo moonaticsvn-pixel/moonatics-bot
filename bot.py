@@ -165,7 +165,22 @@ async def on_ready():
         print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"[error] Failed to sync commands: {e}")
+    await seed_seen()
     poll_youtube.start()
+
+
+async def seed_seen():
+    """On first run, populate seen.json with current content so we don't spam old posts."""
+    if os.path.exists(SEEN_FILE):
+        return
+    print("[seed] seen.json not found — seeding current content to avoid notification flood...")
+    seen = {}
+    for content_type in TABS:
+        entries = await scrape_tab(content_type)
+        seen[content_type] = [e["id"] for e in entries]
+        print(f"[seed] {content_type}: {len(entries)} entries cached")
+    save_json(SEEN_FILE, seen)
+    print("[seed] Done — only new content from this point will trigger notifications")
 
 
 # ---------------------------------------------------------------------------
