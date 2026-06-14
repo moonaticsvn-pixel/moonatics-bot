@@ -25,7 +25,7 @@ DEFAULT_MESSAGES = {
     "video":      "🎬 {role} New video from **Moonatics**!\n**{title}**\n{url}",
     "short":      "🩳 {role} New Short from **Moonatics**!\n**{title}**\n{url}",
     "livestream": "🔴 {role} **Moonatics** is going LIVE!\n**{title}**\n{url}",
-    "community":  "📢 {role} New community post from **Moonatics**!\n{title}\n{url}",
+    "community":  "📢 {role} New community post from **Moonatics**!\n\n{title}\n\n{url}",
 }
 
 # ---------------------------------------------------------------------------
@@ -48,13 +48,11 @@ def save_json(path: str, data) -> None:
 # yt-dlp scraping (blocking — run in executor)
 # ---------------------------------------------------------------------------
 
-def _scrape_tab(url: str) -> list[dict]:
+def _scrape(url: str, content_type: str) -> list[dict]:
     """
-    Extract the first 10 entries from a YouTube tab URL.
-    Returns a list of dicts with at least 'id', 'title', 'url' keys.
+    Full yt-dlp extraction for a YouTube tab — fetches real titles/content for all types.
     """
     opts = {
-        "extract_flat": "in_playlist",
         "quiet": True,
         "no_warnings": True,
         "playlist_items": "1-10",
@@ -64,30 +62,31 @@ def _scrape_tab(url: str) -> list[dict]:
         try:
             info = ydl.extract_info(url, download=False)
         except Exception as e:
-            print(f"[yt-dlp] error scraping {url}: {e}")
+            print(f"[yt-dlp] error scraping {content_type}: {e}")
             return []
 
     if not info:
         return []
 
-    entries = info.get("entries", [])
     results = []
-    for entry in entries:
+    for entry in info.get("entries", []):
         if not entry:
             continue
-        eid = entry.get("id") or entry.get("url", "")
-        title = entry.get("title", "")
-        eurl = entry.get("url") or entry.get("webpage_url") or f"https://www.youtube.com/watch?v={eid}"
-        # Community posts have webpage_url like https://www.youtube.com/post/Ug...
-        if entry.get("webpage_url"):
-            eurl = entry["webpage_url"]
+        eid = entry.get("id", "")
+        if content_type == "community":
+            # Post body text is in 'content', fallback to 'title'
+            title = entry.get("content") or entry.get("description") or entry.get("title", "")
+            eurl = entry.get("webpage_url") or f"https://www.youtube.com/post/{eid}"
+        else:
+            title = entry.get("title", "")
+            eurl = entry.get("webpage_url") or f"https://www.youtube.com/watch?v={eid}"
         results.append({"id": eid, "title": title, "url": eurl})
     return results
 
 
 async def scrape_tab(content_type: str) -> list[dict]:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _scrape_tab, TABS[content_type])
+    return await loop.run_in_executor(None, _scrape, TABS[content_type], content_type)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +185,7 @@ yt = app_commands.Group(name="yt", description="YouTube notification settings")
     video_template="Video message template — use {role}, {title}, {url}",
     short_template="Short message template — use {role}, {title}, {url}",
     livestream_template="Livestream message template — use {role}, {title}, {url}",
-    community_template="Community post message template — use {role}, {title} (post text), {url}",
+    community_template="Community post template — use {role}, {title} (auto-fetched post text), {url}",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def yt_setup(
