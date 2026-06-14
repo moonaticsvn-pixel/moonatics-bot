@@ -7,7 +7,7 @@ import os
 import yt_dlp
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
-YOUTUBE_HANDLE = "ragakov"
+YOUTUBE_HANDLE = "moonaticsmusic"
 
 CONFIG_FILE = "config.json"
 SEEN_FILE = "seen.json"
@@ -57,6 +57,14 @@ def _scrape(url: str, content_type: str) -> list[dict]:
         "no_warnings": True,
         "playlist_items": "1-10",
         "skip_download": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web"],
+            }
+        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
